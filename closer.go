@@ -35,6 +35,7 @@ var (
 		syscall.SIGINT,
 		syscall.SIGHUP,
 		syscall.SIGTERM,
+		syscall.SIGQUIT,
 	}
 	// DefaultSignalSet will have syscall.SIGABRT that should be
 	// opted out if user wants to debug the stacktrace.
@@ -65,7 +66,8 @@ type closer struct {
 	signals    []os.Signal
 	sem        sync.Mutex
 	closeOnce  sync.Once
-	cleanups   []func()
+	ctrlC      []func()
+	ctrlSlash  []func()
 	errChan    chan struct{}
 	doneChan   chan struct{}
 	signalChan chan os.Signal
@@ -98,13 +100,20 @@ func newCloser() *closer {
 }
 
 func (c *closer) wait() {
+	var way string
 	exitCode := c.codeOK
 
 	// wait for a close request
 	select {
 	case <-c.cancelWaitChan:
 		return
-	case <-c.signalChan:
+	case sig := <-c.signalChan:
+		switch sig {
+		case syscall.SIGINT:
+			way = "c"
+		case syscall.SIGQUIT:
+			way = "slash"
+		}
 	case <-c.closeChan:
 		break
 	case <-c.errChan:
@@ -116,9 +125,17 @@ func (c *closer) wait() {
 
 	c.sem.Lock()
 	defer c.sem.Unlock()
-	for _, fn := range c.cleanups {
-		fn()
+	switch way {
+	case "c":
+		for _, fn := range c.ctrlC {
+			fn()
+		}
+	case "slash":
+		for _, fn := range c.ctrlSlash {
+			fn()
+		}
 	}
+
 	// done!
 	close(c.doneChan)
 }
@@ -229,17 +246,26 @@ func Init(cfg Config) {
 
 // Bind will register the cleanup function that will be called when closer will get a close request.
 // All the callbacks will be called in the reverse order they were bound, that's similar to how `defer` works.
-func Bind(cleanup func()) {
+func BindCtrC(cleanup func()) {
 	c.sem.Lock()
 	// store in the reverse order
-	s := make([]func(), 0, 1+len(c.cleanups))
+	s := make([]func(), 0, 1+len(c.ctrlC))
 	s = append(s, cleanup)
-	c.cleanups = append(s, c.cleanups...)
+	c.ctrlC = append(s, c.ctrlC...)
+	c.sem.Unlock()
+}
+
+func BindCtrSlash(cleanup func()) {
+	c.sem.Lock()
+	// store in the reverse order
+	s := make([]func(), 0, 1+len(c.ctrlSlash))
+	s = append(s, cleanup)
+	c.ctrlSlash = append(s, c.ctrlSlash...)
 	c.sem.Unlock()
 }
 
 // Checked runs the target function and checks for panics and errors it may yield. In case of panic or error, closer
-// will terminate the app with an error code, but either case it will call all the bound callbacks beforehand.
+// will terminate the app with an error code, but either case it will call agoll the bound callbacks beforehand.
 // One can use this instead of `defer` if you need to care about errors and panics that always may happen.
 // This function optionally can emit log messages via standard `log` package.
 func Checked(target func() error, logging bool) {
