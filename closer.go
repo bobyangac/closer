@@ -111,7 +111,7 @@ func (c *closer) wait() {
 		switch sig {
 		case syscall.SIGINT:
 			way = "c"
-		case syscall.SIGQUIT:
+		case syscall.SIGTERM:
 			way = "slash"
 		}
 	case <-c.closeChan:
